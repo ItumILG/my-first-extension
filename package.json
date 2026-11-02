@@ -21,7 +21,22 @@
         "command": "workTimer.stop",
         "title": "Остановить таймер работы"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Work Timer",
+      "properties": {
+        "workTimer.workDuration": {
+          "type": "number",
+          "default": 40,
+          "description": "Длительность рабочего периода в минутах (по умолчанию 40)."
+        },
+        "workTimer.breakDuration": {
+          "type": "number",
+          "default": 10,
+          "description": "Длительность перерыва в минутах (по умолчанию 10)."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
