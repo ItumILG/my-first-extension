@@ -20,6 +20,10 @@
       {
         "command": "workTimer.stop",
         "title": "Остановить таймер работы"
+      },
+      {
+        "command": "workTimer.showStats",
+        "title": "Показать статистику таймера"
       }
     ],
     "configuration": {
