@@ -7,9 +7,25 @@ let workTimer: NodeJS.Timeout | undefined;
 let breakTimer: NodeJS.Timeout | undefined;
 let statusBarItem: vscode.StatusBarItem;
 
-// Временные интервалы (в миллисекундах)
-const WORK_DURATION_MS = 40 * 60 * 1000; // 40 минут работы
-const BREAK_DURATION_MS = 10 * 60 * 1000; // 10 минут перерыва
+/**
+ * Получает длительность рабочего периода в миллисекундах из настроек VS Code.
+ * По умолчанию: 40 минут.
+ */
+function getWorkDurationMs(): number {
+    const config = vscode.workspace.getConfiguration('workTimer');
+    const minutes = config.get<number>('workDuration', 40);
+    return minutes * 60 * 1000;
+}
+
+/**
+ * Получает длительность перерыва в миллисекундах из настроек VS Code.
+ * По умолчанию: 10 минут.
+ */
+function getBreakDurationMs(): number {
+    const config = vscode.workspace.getConfiguration('workTimer');
+    const minutes = config.get<number>('breakDuration', 10);
+    return minutes * 60 * 1000;
+}
 
 /**
  * Основная точка входа в расширение.
@@ -29,7 +45,8 @@ export function activate(context: vscode.ExtensionContext) {
     // Запуск таймера вручную
     const startDisposable = vscode.commands.registerCommand('workTimer.start', () => {
         startWorkTimer();
-        vscode.window.showInformationMessage('Таймер работы запущен (40 минут).');
+        const minutes = Math.round(getWorkDurationMs() / (60 * 1000));
+        vscode.window.showInformationMessage(`Таймер работы запущен (${minutes} мин).`);
     });
 
     // Остановка таймера вручную
@@ -47,17 +64,19 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
- * Запускает рабочий 40-минутный цикл.
+ * Запускает рабочий цикл на основе настроек.
  * Обновляет статус-бар и назначает уведомление об окончании работы.
  */
 function startWorkTimer() {
     clearAllTimers();
-    statusBarItem.text = "$(code) Работаем (40 мин)";
+    const workMinutes = Math.round(getWorkDurationMs() / (60 * 1000));
+    statusBarItem.text = `$(code) Работаем (${workMinutes} мин)`;
 
     workTimer = setTimeout(async () => {
-        // Запрос действия у пользователя по истечении 40 минут
+        const breakMinutes = Math.round(getBreakDurationMs() / (60 * 1000));
+        // Запрос действия у пользователя по истечении времени
         const selection = await vscode.window.showWarningMessage(
-            'Прошло 40 минут! Пора сделать перерыв на 10 минут.',
+            `Прошло ${workMinutes} мин! Пора сделать перерыв на ${breakMinutes} мин.`,
             'Начать перерыв',
             'Пропустить'
         );
@@ -68,28 +87,29 @@ function startWorkTimer() {
             // Если перерыв пропущен или окно закрыто — перезапускаем рабочий цикл
             startWorkTimer();
         }
-    }, WORK_DURATION_MS);
+    }, getWorkDurationMs());
 }
 
 /**
- * Запускает 10-минутный цикл перерыва.
+ * Запускает цикл перерыва на основе настроек.
  * Обновляет статус-бар и напоминает о возврате к работе.
  */
 function startBreakTimer() {
     clearAllTimers();
-    statusBarItem.text = "$(coffee) Перерыв (10 мин)";
+    const breakMinutes = Math.round(getBreakDurationMs() / (60 * 1000));
+    statusBarItem.text = `$(coffee) Перерыв (${breakMinutes} мин)`;
 
     breakTimer = setTimeout(async () => {
         // Уведомление о завершении перерыва
         const selection = await vscode.window.showInformationMessage(
-            'Перерыв 10 минут окончен! Пора возвращаться к работе.',
+            `Перерыв ${breakMinutes} мин окончен! Пора возвращаться к работе.`,
             'Вернуться к работе'
         );
 
         if (selection === 'Вернуться к работе' || selection === undefined) {
             startWorkTimer();
         }
-    }, BREAK_DURATION_MS);
+    }, getBreakDurationMs());
 }
 
 /**
