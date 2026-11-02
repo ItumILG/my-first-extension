@@ -6,17 +6,18 @@ import * as vscode from 'vscode';
 let workTimer: NodeJS.Timeout | undefined;
 let breakTimer: NodeJS.Timeout | undefined;
 let statusBarItem: vscode.StatusBarItem;
+let globalContext: vscode.ExtensionContext;
 
-// Накопленная статистика (в миллисекундах)
-let totalWorkMs = 0;
-let totalBreakMs = 0;
+// Ключи для постоянного сохранения данных в глобальном хранилище VS Code (globalState)
+const STORAGE_KEY_WORK = 'workTimer.totalWorkMs';
+const STORAGE_KEY_BREAK = 'workTimer.totalBreakMs';
 
-// Метки для отслеживания текущей сессии
+// Метки для отслеживания текущего состояния сессии и подсчета времени «на лету»
 let sessionStartTime: number | undefined;
 let currentMode: 'work' | 'break' | 'stopped' = 'stopped';
 
 /**
- * Получает длительность рабочего периода в миллисекундах из настроек VS Code.
+ * Получает длительность рабочего периода в миллисекундах из настроек конфигурации VS Code.
  * По умолчанию: 40 минут.
  */
 function getWorkDurationMs(): number {
@@ -26,7 +27,7 @@ function getWorkDurationMs(): number {
 }
 
 /**
- * Получает длительность перерыва в миллисекундах из настроек VS Code.
+ * Получает длительность перерыва в миллисекундах из настроек конфигурации VS Code.
  * По умолчанию: 10 минут.
  */
 function getBreakDurationMs(): number {
@@ -36,42 +37,88 @@ function getBreakDurationMs(): number {
 }
 
 /**
- * Основная точка входа в расширение.
- * Вызывается VS Code при активации плагина.
- * @param context Контекст расширения для управления подписками и ресурсами
+ * Основная точка входа в расширение (вызывается при активации плагина).
+ * @param context Контекст расширения, предоставляемый VS Code для управления подписками и состоянием.
  */
 export function activate(context: vscode.ExtensionContext) {
+    globalContext = context;
     console.log('Расширение "Work Timer" успешно активировано');
 
     // --- Инициализация статус-бара ---
+    // Создаем элемент справа в статус-баре и привязываем к нему команду открытия меню
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'workTimer.menu'; 
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
     // --- Регистрация пользовательских команд ---
 
-    // 1. Запуск таймера вручную
+    // 1. Интерактивное меню (вызывается кликом по статус-бару)
+    const menuDisposable = vscode.commands.registerCommand('workTimer.menu', async () => {
+        const action = await vscode.window.showQuickPick(
+            [
+                { label: '$(play) Запустить / Перезапустить таймер', id: 'start' },
+                { label: '$(debug-pause) Остановить таймер', id: 'stop' },
+                { label: '$(coffee) Сделать перерыв сейчас', id: 'break' },
+                { label: '$(graph) Показать статистику', id: 'stats' },
+                { label: '$(gear) Настроить время (работа/перерыв)', id: 'config' },
+                { label: '$(trash) Сбросить сохраненную статистику', id: 'resetStats' }
+            ],
+            { placeHolder: 'Выберите действие с таймером' }
+        );
+
+        if (!action) {
+            return;
+        }
+
+        // Маршрутизация действий пользователя из выпадающего списка
+        switch (action.id) {
+            case 'start':
+                startWorkTimer();
+                vscode.window.showInformationMessage('Таймер работы запущен.');
+                break;
+            case 'stop':
+                stopTimerAndSaveStats();
+                statusBarItem.text = "$(watch) Таймер остановлен";
+                vscode.window.showInformationMessage('Таймер остановлен. Статистика сохранена.');
+                break;
+            case 'break':
+                startBreakTimer();
+                vscode.window.showInformationMessage('Перерыв принудительно запущен.');
+                break;
+            case 'stats':
+                showStatistics();
+                break;
+            case 'config':
+                vscode.commands.executeCommand('workTimer.setDuration');
+                break;
+            case 'resetStats':
+                await resetStatistics();
+                break;
+        }
+    });
+
+    // 2. Ручной запуск таймера из палитры команд
     const startDisposable = vscode.commands.registerCommand('workTimer.start', () => {
         startWorkTimer();
         const minutes = Math.round(getWorkDurationMs() / (60 * 1000));
         vscode.window.showInformationMessage(`Таймер работы запущен (${minutes} мин).`);
     });
 
-    // 2. Остановка таймера вручную
+    // 3. Ручная остановка таймера
     const stopDisposable = vscode.commands.registerCommand('workTimer.stop', () => {
         stopTimerAndSaveStats();
         statusBarItem.text = "$(watch) Таймер остановлен";
         vscode.window.showInformationMessage('Таймер остановлен. Статистика сохранена.');
     });
 
-    // 3. Просмотр собранной статистики
+    // 4. Просмотр статистики
     const statsDisposable = vscode.commands.registerCommand('workTimer.showStats', () => {
         showStatistics();
     });
 
-    // 4. Интерактивная настройка времени через диалоговые окна ввода
+    // 5. Настройка длительности интервалов через диалоговые окна ввода
     const setDurationDisposable = vscode.commands.registerCommand('workTimer.setDuration', async () => {
-        // Запрос времени работы
         const workInput = await vscode.window.showInputBox({
             prompt: 'Введите длительность работы в минутах',
             value: String(Math.round(getWorkDurationMs() / (60 * 1000))),
@@ -85,7 +132,6 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Запрос времени перерыва
         const breakInput = await vscode.window.showInputBox({
             prompt: 'Введите длительность перерыва в минутах',
             value: String(Math.round(getBreakDurationMs() / (60 * 1000))),
@@ -99,61 +145,74 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Сохранение глобальных настроек в конфигурацию VS Code
+        // Сохранение параметров в глобальную конфигурацию VS Code
         const config = vscode.workspace.getConfiguration('workTimer');
         await config.update('workDuration', Number(workInput), vscode.ConfigurationTarget.Global);
         await config.update('breakDuration', Number(breakInput), vscode.ConfigurationTarget.Global);
 
         vscode.window.showInformationMessage(`Настройки обновлены: Работа — ${workInput} мин, Перерыв — ${breakInput} мин.`);
-        
-        // Автоматический перезапуск таймера с новыми параметрами
         startWorkTimer();
     });
 
-    // Регистрируем все команды в подписках для автоматической очистки
-    context.subscriptions.push(startDisposable, stopDisposable, statsDisposable, setDurationDisposable);
+    // Регистрируем все созданные команды в контексте для автоматической очистки
+    context.subscriptions.push(
+        menuDisposable,
+        startDisposable,
+        stopDisposable,
+        statsDisposable,
+        setDurationDisposable
+    );
 
-    // Автоматический старт первого рабочего цикла при активации
+    // Автоматический запуск рабочего процесса при активации расширения
     startWorkTimer();
 }
 
 /**
- * Запускает рабочий цикл на основе текущих настроек.
- * Обновляет статус-бар и фиксирует начало сессии.
+ * Запускает рабочий цикл таймера.
+ * @param customDurationMs Опциональный параметр для кастомной длительности (используется при отсрочке).
  */
-function startWorkTimer() {
-    stopTimerAndSaveStats(); // Сохраняем прогресс предыдущего интервала
+function startWorkTimer(customDurationMs?: number) {
+    stopTimerAndSaveStats(); // Сохраняем прогресс предыдущего интервала перед стартом нового
     currentMode = 'work';
     sessionStartTime = Date.now();
 
-    const workMinutes = Math.round(getWorkDurationMs() / (60 * 1000));
-    statusBarItem.text = `$(code) Работаем (${workMinutes} мин)`;
+    const durationMs = customDurationMs ?? getWorkDurationMs();
+    const workMinutes = Math.round(durationMs / (60 * 1000));
+    
+    // Обновляем текст в статус-баре
+    statusBarItem.text = customDurationMs 
+        ? `$(code) Работаем (отсрочка ${workMinutes} мин)` 
+        : `$(code) Работаем (${workMinutes} мин)`;
 
     workTimer = setTimeout(async () => {
-        // Фиксируем отработанное время при успешном завершении интервала
+        // По завершении таймера фиксируем отработанное время
         if (currentMode === 'work' && sessionStartTime) {
-            totalWorkMs += Date.now() - sessionStartTime;
+            addWorkTime(Date.now() - sessionStartTime);
             sessionStartTime = undefined;
         }
 
         const breakMinutes = Math.round(getBreakDurationMs() / (60 * 1000));
+        
+        // Показываем предупреждение с действиями на выбор
         const selection = await vscode.window.showWarningMessage(
-            `Прошло ${workMinutes} мин! Пора сделать перерыв на ${breakMinutes} мин.`,
+            `Время работы (${workMinutes} мин) подошло к концу! Пора сделать перерыв на ${breakMinutes} мин.`,
             'Начать перерыв',
+            'Отложить на 5 мин',
             'Пропустить'
         );
 
         if (selection === 'Начать перерыв') {
             startBreakTimer();
+        } else if (selection === 'Отложить на 5 мин') {
+            startWorkTimer(5 * 60 * 1000); // Перезапуск работы на 5 минут
         } else {
-            startWorkTimer();
+            startWorkTimer(); // Пропуск перерыва и старт новой рабочей сессии
         }
-    }, getWorkDurationMs());
+    }, durationMs);
 }
 
 /**
- * Запускает цикл перерыва на основе настроек.
- * Обновляет статус-бар и напоминает о возврате к работе.
+ * Запускает цикл перерыва.
  */
 function startBreakTimer() {
     stopTimerAndSaveStats();
@@ -165,7 +224,7 @@ function startBreakTimer() {
 
     breakTimer = setTimeout(async () => {
         if (currentMode === 'break' && sessionStartTime) {
-            totalBreakMs += Date.now() - sessionStartTime;
+            addBreakTime(Date.now() - sessionStartTime);
             sessionStartTime = undefined;
         }
 
@@ -181,15 +240,31 @@ function startBreakTimer() {
 }
 
 /**
- * Останавливает активные таймеры и фиксирует прошедшее время текущей незавершенной сессии.
+ * Добавляет указанное количество миллисекунд к общему рабочему времени в globalState.
+ */
+function addWorkTime(ms: number) {
+    const current = globalContext.globalState.get<number>(STORAGE_KEY_WORK, 0);
+    globalContext.globalState.update(STORAGE_KEY_WORK, current + ms);
+}
+
+/**
+ * Добавляет указанное количество миллисекунд ко времени перерыва в globalState.
+ */
+function addBreakTime(ms: number) {
+    const current = globalContext.globalState.get<number>(STORAGE_KEY_BREAK, 0);
+    globalContext.globalState.update(STORAGE_KEY_BREAK, current + ms);
+}
+
+/**
+ * Останавливает все активные таймеры и сохраняет текущую незавершенную сессию в хранилище.
  */
 function stopTimerAndSaveStats() {
     if (sessionStartTime && currentMode !== 'stopped') {
         const elapsed = Date.now() - sessionStartTime;
         if (currentMode === 'work') {
-            totalWorkMs += elapsed;
+            addWorkTime(elapsed);
         } else if (currentMode === 'break') {
-            totalBreakMs += elapsed;
+            addBreakTime(elapsed);
         }
         sessionStartTime = undefined;
     }
@@ -206,13 +281,22 @@ function stopTimerAndSaveStats() {
 }
 
 /**
- * Вычисляет и выводит общую статистику работы и отдыха в информационное окно.
+ * Полностью сбрасывает сохраненную в globalState статистику.
+ */
+async function resetStatistics() {
+    await globalContext.globalState.update(STORAGE_KEY_WORK, 0);
+    await globalContext.globalState.update(STORAGE_KEY_BREAK, 0);
+    vscode.window.showInformationMessage('📊 Статистика таймера успешно сброшена.');
+}
+
+/**
+ * Вычисляет и выводит общую накопленную статистику (включая активную текущую сессию).
  */
 function showStatistics() {
-    let activeWork = totalWorkMs;
-    let activeBreak = totalBreakMs;
+    let activeWork = globalContext.globalState.get<number>(STORAGE_KEY_WORK, 0);
+    let activeBreak = globalContext.globalState.get<number>(STORAGE_KEY_BREAK, 0);
 
-    // Учитываем текущую активную незавершенную сессию «на лету»
+    // Учитываем время текущей незавершенной сессии «на лету»
     if (sessionStartTime && currentMode !== 'stopped') {
         const elapsed = Date.now() - sessionStartTime;
         if (currentMode === 'work') {
@@ -226,13 +310,12 @@ function showStatistics() {
     const breakMins = (activeBreak / (60 * 1000)).toFixed(1);
 
     vscode.window.showInformationMessage(
-        `📊 Статистика таймера:\n• Отработано: ${workMins} мин.\n• Отдых: ${breakMins} мин.`
+        `📊 Накопленная статистика:\n• Отработано: ${workMins} мин.\n• Отдых: ${breakMins} мин.`
     );
 }
 
 /**
- * Точка деактивации расширения.
- * Вызывается при закрытии VS Code или выгрузке плагина.
+ * Точка деактивации расширения (вызывается при закрытии редактора или выгрузке плагина).
  */
 export function deactivate() {
     stopTimerAndSaveStats();
