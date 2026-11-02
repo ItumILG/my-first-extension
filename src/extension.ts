@@ -17,6 +17,7 @@ let currentMode: 'work' | 'break' | 'stopped' = 'stopped';
 
 /**
  * Получает длительность рабочего периода в миллисекундах из настроек VS Code.
+ * По умолчанию: 40 минут.
  */
 function getWorkDurationMs(): number {
     const config = vscode.workspace.getConfiguration('workTimer');
@@ -26,6 +27,7 @@ function getWorkDurationMs(): number {
 
 /**
  * Получает длительность перерыва в миллисекундах из настроек VS Code.
+ * По умолчанию: 10 минут.
  */
 function getBreakDurationMs(): number {
     const config = vscode.workspace.getConfiguration('workTimer');
@@ -48,37 +50,79 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- Регистрация пользовательских команд ---
 
-    // Запуск таймера вручную
+    // 1. Запуск таймера вручную
     const startDisposable = vscode.commands.registerCommand('workTimer.start', () => {
         startWorkTimer();
         const minutes = Math.round(getWorkDurationMs() / (60 * 1000));
         vscode.window.showInformationMessage(`Таймер работы запущен (${minutes} мин).`);
     });
 
-    // Остановка таймера вручную
+    // 2. Остановка таймера вручную
     const stopDisposable = vscode.commands.registerCommand('workTimer.stop', () => {
         stopTimerAndSaveStats();
         statusBarItem.text = "$(watch) Таймер остановлен";
         vscode.window.showInformationMessage('Таймер остановлен. Статистика сохранена.');
     });
 
-    // Показ статистики
+    // 3. Просмотр собранной статистики
     const statsDisposable = vscode.commands.registerCommand('workTimer.showStats', () => {
         showStatistics();
     });
 
-    // Регистрируем команды в подписках для автоматической очистки при деактивации
-    context.subscriptions.push(startDisposable, stopDisposable, statsDisposable);
+    // 4. Интерактивная настройка времени через диалоговые окна ввода
+    const setDurationDisposable = vscode.commands.registerCommand('workTimer.setDuration', async () => {
+        // Запрос времени работы
+        const workInput = await vscode.window.showInputBox({
+            prompt: 'Введите длительность работы в минутах',
+            value: String(Math.round(getWorkDurationMs() / (60 * 1000))),
+            validateInput: (value) => {
+                const num = Number(value);
+                return isNaN(num) || num <= 0 ? 'Введите число больше 0' : null;
+            }
+        });
 
-    // Автоматический старт первого рабочего цикла при запуске расширения
+        if (!workInput) {
+            return;
+        }
+
+        // Запрос времени перерыва
+        const breakInput = await vscode.window.showInputBox({
+            prompt: 'Введите длительность перерыва в минутах',
+            value: String(Math.round(getBreakDurationMs() / (60 * 1000))),
+            validateInput: (value) => {
+                const num = Number(value);
+                return isNaN(num) || num <= 0 ? 'Введите число больше 0' : null;
+            }
+        });
+
+        if (!breakInput) {
+            return;
+        }
+
+        // Сохранение глобальных настроек в конфигурацию VS Code
+        const config = vscode.workspace.getConfiguration('workTimer');
+        await config.update('workDuration', Number(workInput), vscode.ConfigurationTarget.Global);
+        await config.update('breakDuration', Number(breakInput), vscode.ConfigurationTarget.Global);
+
+        vscode.window.showInformationMessage(`Настройки обновлены: Работа — ${workInput} мин, Перерыв — ${breakInput} мин.`);
+        
+        // Автоматический перезапуск таймера с новыми параметрами
+        startWorkTimer();
+    });
+
+    // Регистрируем все команды в подписках для автоматической очистки
+    context.subscriptions.push(startDisposable, stopDisposable, statsDisposable, setDurationDisposable);
+
+    // Автоматический старт первого рабочего цикла при активации
     startWorkTimer();
 }
 
 /**
- * Запускает рабочий цикл на основе настроек.
+ * Запускает рабочий цикл на основе текущих настроек.
+ * Обновляет статус-бар и фиксирует начало сессии.
  */
 function startWorkTimer() {
-    stopTimerAndSaveStats(); // Сохраняем предыдущий прогресс, если был активен другой режим
+    stopTimerAndSaveStats(); // Сохраняем прогресс предыдущего интервала
     currentMode = 'work';
     sessionStartTime = Date.now();
 
@@ -86,7 +130,7 @@ function startWorkTimer() {
     statusBarItem.text = `$(code) Работаем (${workMinutes} мин)`;
 
     workTimer = setTimeout(async () => {
-        // Если цикл завершился полностью, фиксируем отработанное время
+        // Фиксируем отработанное время при успешном завершении интервала
         if (currentMode === 'work' && sessionStartTime) {
             totalWorkMs += Date.now() - sessionStartTime;
             sessionStartTime = undefined;
@@ -109,6 +153,7 @@ function startWorkTimer() {
 
 /**
  * Запускает цикл перерыва на основе настроек.
+ * Обновляет статус-бар и напоминает о возврате к работе.
  */
 function startBreakTimer() {
     stopTimerAndSaveStats();
@@ -136,7 +181,7 @@ function startBreakTimer() {
 }
 
 /**
- * Останавливает активные таймеры и дописывает прошедшее время текущей сессии в статистику.
+ * Останавливает активные таймеры и фиксирует прошедшее время текущей незавершенной сессии.
  */
 function stopTimerAndSaveStats() {
     if (sessionStartTime && currentMode !== 'stopped') {
@@ -161,13 +206,13 @@ function stopTimerAndSaveStats() {
 }
 
 /**
- * Выводит общую статистику работы и отдыха в информационное окно.
+ * Вычисляет и выводит общую статистику работы и отдыха в информационное окно.
  */
 function showStatistics() {
-    // Если сессия идет прямо сейчас, учитываем её текущий прогресс для отображения
     let activeWork = totalWorkMs;
     let activeBreak = totalBreakMs;
 
+    // Учитываем текущую активную незавершенную сессию «на лету»
     if (sessionStartTime && currentMode !== 'stopped') {
         const elapsed = Date.now() - sessionStartTime;
         if (currentMode === 'work') {
@@ -187,6 +232,7 @@ function showStatistics() {
 
 /**
  * Точка деактивации расширения.
+ * Вызывается при закрытии VS Code или выгрузке плагина.
  */
 export function deactivate() {
     stopTimerAndSaveStats();
